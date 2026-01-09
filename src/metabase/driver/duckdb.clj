@@ -530,11 +530,26 @@
        "SELECT unnest(string_split(current_setting('search_path'), ','))"
        "))"))
 
+(def ^:private excluded-schemas-filter
+  "SQL filter clause that excludes system schemas when not filtering by search_path."
+  (str "table_schema NOT IN ('information_schema', 'pg_catalog', 'md_information_schema') "
+       "AND table_catalog NOT IN ('system', 'temp')"))
+
+(defn- schema-filter-for-database
+  "Returns the appropriate schema filter SQL clause based on database settings.
+   When filter_by_search_path is true, uses search_path filter.
+   When false (default), excludes only system schemas."
+  [database]
+  (if (get-in database [:details :filter_by_search_path])
+    search-path-filter
+    excluded-schemas-filter))
+
 (defmethod driver/describe-database :duckdb
   [driver database]
-  (let [get_tables_query (str "SELECT table_catalog || '.' || table_schema AS table_schema, table_name "
+  (let [schema-filter (schema-filter-for-database database)
+        get_tables_query (str "SELECT table_catalog || '.' || table_schema AS table_schema, table_name "
                               "FROM information_schema.tables WHERE table_catalog NOT LIKE '__ducklake_metadata%' AND "
-                              search-path-filter)]
+                              schema-filter)]
     {:tables
      (sql-jdbc.execute/do-with-connection-with-options
       driver database nil
@@ -551,11 +566,12 @@
         catalog-filter (if catalog
                          (format "table_catalog = '%s' AND " catalog)
                          "")
+        schema-filter (schema-filter-for-database database)
         get_columns_query (str
                            (format
                             "SELECT * FROM information_schema.columns WHERE table_name = '%s' AND %stable_schema = '%s' AND table_catalog NOT LIKE '__ducklake_metadata%%' AND "
                             table_name catalog-filter actual-schema)
-                           search-path-filter)]
+                           schema-filter)]
     {:name   table_name
      :schema schema
      :fields
