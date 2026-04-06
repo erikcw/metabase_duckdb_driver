@@ -564,34 +564,64 @@
                            [get_tables_query])]
            {:name table_name :schema table_schema :description table_comment}))))}))
 
-(defmethod driver/describe-table :duckdb
-  [driver database {table_name :name, schema :schema}]
-  (let [[catalog actual-schema] (split-composite-schema schema)
-        catalog-filter (if catalog
+(defn- fields-from-information-schema
+  "Get fields via information_schema.columns, filtering out unknown types and the __ column."
+  [driver conn database table_name catalog actual-schema]
+  (let [catalog-filter (if catalog
                          (format "table_catalog = '%s' AND " catalog)
                          "")
         schema-filter (schema-filter-for-database database)
-        get_columns_query (str
-                           (format
-                            "SELECT * FROM information_schema.columns WHERE table_name = '%s' AND %stable_schema = '%s' AND table_catalog NOT LIKE '__ducklake_metadata%%' AND "
-                            table_name catalog-filter actual-schema)
-                           schema-filter)]
+        query (str
+               (format
+                "SELECT * FROM information_schema.columns WHERE table_name = '%s' AND %stable_schema = '%s' AND table_catalog NOT LIKE '__ducklake_metadata%%' AND "
+                table_name catalog-filter actual-schema)
+               schema-filter)
+        results (jdbc/query {:connection conn} [query])]
+    (set
+     (for [[idx {column_name :column_name, data_type :data_type, column_comment :column_comment}] (m/indexed results)
+           :let [base-type (sql-jdbc.sync/database-type->base-type driver (keyword data_type))]
+           :when (and (some? base-type) (not= column_name "__"))]
+       {:name              column_name
+        :database-type     data_type
+        :base-type         base-type
+        :database-position idx
+        :field-comment     column_comment}))))
+
+(defn- fields-from-describe
+  "Fallback: get fields via DESCRIBE SELECT * FROM table. Works for Iceberg and other
+   extensions that don't populate information_schema.columns."
+  [driver conn catalog actual-schema table_name]
+  (let [qualified-name (if catalog
+                         (format "%s.%s.\"%s\"" catalog actual-schema table_name)
+                         (format "%s.\"%s\"" actual-schema table_name))
+        query (format "DESCRIBE SELECT * FROM %s" qualified-name)
+        results (jdbc/query {:connection conn} [query])]
+    (set
+     (for [[idx {column_name :column_name, data_type :column_type}] (m/indexed results)
+           :let [base-type (sql-jdbc.sync/database-type->base-type driver (keyword data_type))]
+           :when (and (some? base-type) (not= column_name "__"))]
+       {:name              column_name
+        :database-type     data_type
+        :base-type         base-type
+        :database-position idx}))))
+
+(defmethod driver/describe-table :duckdb
+  [driver database {table_name :name, schema :schema}]
+  (let [[catalog actual-schema] (split-composite-schema schema)]
     {:name   table_name
      :schema schema
      :fields
      (sql-jdbc.execute/do-with-connection-with-options
       driver database nil
       (fn [conn]
-        (let [results (jdbc/query
-                       {:connection (clone-raw-connection conn database)}
-                       [get_columns_query])]
-          (set
-           (for [[idx {column_name :column_name, data_type :data_type, column_comment :column_comment}] (m/indexed results)]
-             {:name              column_name
-              :database-type     data_type
-              :base-type         (sql-jdbc.sync/database-type->base-type driver (keyword data_type))
-              :database-position idx
-              :field-comment     column_comment})))))}))
+        (let [cloned-conn (clone-raw-connection conn database)
+              info-schema-fields (fields-from-information-schema driver cloned-conn database table_name catalog actual-schema)]
+          (if (seq info-schema-fields)
+            info-schema-fields
+            (do
+              (log/infof "No columns found in information_schema for %s.%s.%s, falling back to DESCRIBE"
+                         (or catalog "default") actual-schema table_name)
+              (fields-from-describe driver cloned-conn catalog actual-schema table_name))))))}))
 
 
 ;; The 0.4.0 DuckDB JDBC .getImportedKeys method throws 'not implemented' yet.
