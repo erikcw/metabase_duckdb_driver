@@ -392,15 +392,17 @@
   [driver [_ arg pattern]]
   [:regexp_extract (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver pattern)])
 
-;; Override table identifier generation to handle composite "catalog.schema" schemas
-;; This produces three-part identifiers: catalog.schema.table
+;; Override table identifier generation to handle composite "catalog.schema" schemas.
+;; DuckDB's Iceberg binder doesn't support quoted three-part identifiers in column
+;; references (e.g. "catalog"."schema"."table"."column"), so we emit a raw unquoted
+;; SQL fragment for catalog.schema.table references in FROM clauses.
 (defmethod sql.qp/->honeysql [:duckdb :metadata/table]
   [driver {:keys [schema name] :as table}]
   (log/tracef "DuckDB :metadata/table method called! schema=%s name=%s" schema name)
   (let [[catalog actual-schema] (split-composite-schema schema)]
     (if catalog
-      ;; Three-part identifier: catalog.schema.table
-      (h2x/identifier :table catalog actual-schema name)
+      ;; Raw SQL fragment with unquoted catalog.schema for Iceberg compatibility
+      [:raw (str catalog "." actual-schema ".\"" name "\"")]
       ;; Fall back to default behavior for non-composite schemas
       ((get-method sql.qp/->honeysql [:sql :metadata/table]) driver table))))
 
