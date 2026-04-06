@@ -508,14 +508,18 @@
         raw-conn-token com.mchange.v2.c3p0.C3P0ProxyConnection/RAW_CONNECTION
         args (into-array Object [])
         ^Connection cloned-conn (.rawConnectionOperation c3p0-conn clone-method raw-conn-token args)]
-    ;; Run init SQL on the cloned connection so that search_path and other settings are applied
+    ;; Run init SQL on the cloned connection so that search_path and other settings are applied.
+    ;; Execute each statement individually for robustness.
     (when-let [init-sql (-> database :details :init_sql)]
       (when (seq (str/trim init-sql))
-        (try
-          (with-open [stmt (.createStatement cloned-conn)]
-            (.execute stmt init-sql))
-          (catch Throwable e
-            (log/errorf e "Failed to execute init SQL on cloned connection")))))
+        (doseq [sql-stmt (remove str/blank?
+                                 (map str/trim (str/split init-sql #";")))]
+          (try
+            (with-open [stmt (.createStatement cloned-conn)]
+              (.execute stmt sql-stmt))
+            (catch Throwable e
+              (log/errorf e "Failed to execute init SQL on cloned connection: %s"
+                          (subs sql-stmt 0 (min 80 (count sql-stmt)))))))))
     cloned-conn))
 
 (def ^:private search-path-filter
