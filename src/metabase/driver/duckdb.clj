@@ -373,9 +373,11 @@
                     (>= (count components) 2))
                (and (= identifier-type :field)
                     (>= (count components) 3))))
-    (let [[catalog schema] (split-composite-schema (first components))]
-      (log/tracef "Splitting composite schema: %s -> [%s %s]" (first components) catalog schema)
-      (vec (concat [catalog schema] (rest components))))
+    (let [[_catalog _schema] (split-composite-schema (first components))]
+      (log/tracef "Stripping catalog+schema from field identifier: %s" (first components))
+      ;; DuckDB Iceberg doesn't support catalog.schema.table.column references.
+      ;; Strip catalog and schema, keep only table.column (the remaining components).
+      (vec (rest components)))
     components))
 
 (defn- split-identifier-schema
